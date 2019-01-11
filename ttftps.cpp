@@ -21,7 +21,7 @@ using namespace std;
 #define NUMBER_OF_FAILURES  7
 #define ACK_OPCODE  4
 #define WRQ_OPCODE  2
-#define DATA_PACK_SIZE 512
+#define DATA_PACK_SIZE 516
 
 
 struct ackPack {
@@ -81,12 +81,32 @@ int parse_WQE_packet(char *buffer, char *filename, char *trans_mode, int *opcode
 	return 0;
 }
 
+int parse_data_packet(char *buffer, int buffer_size, uint16_t *data_size, int *data_block_num, char** data) {
+
+	if (buffer_size < 4) {
+		return  -1;
+	}
+
+	uint16_t  *two_byte_ptr = (uint16_t *)buffer;
+	int opcode = ntohs(*two_byte_ptr);
+
+	if (opcode != 3) {
+		return -1;
+	}
+	*data_size = buffer_size - 4;
+	two_byte_ptr = (uint16_t *)(buffer + 2);
+	*data_block_num = ntohs(*two_byte_ptr);
+	*data = buffer + 4;
+
+	return 0;
+}
+
 void send_ACK_packet(int descriptor, int blockNum, struct sockaddr_in *sock, int len) {
 	struct ackPack ackpack;
 	int res;
 	ackpack.blockNum = htons(blockNum);
 	ackpack.opcode = htons(ACK_OPCODE);
-	// not sure what to type in the buf parameter:
+
 	res = sendto(descriptor, (void*)&ackpack, sizeof(ackpack), 0, (struct sockaddr*)sock, sizeof(*sock));
 	if (res == -1) {
 		perror("Ack sending ERROR\n");
@@ -96,16 +116,12 @@ void send_ACK_packet(int descriptor, int blockNum, struct sockaddr_in *sock, int
 
 int check_WRQ_packet(int opcode, char *mode) {
 
-
 	if (opcode == WRQ_OPCODE && strcmp(mode,"octet\0") == 0) {
 		return 0;
 	}
 	return -1;
 }
 
-int check_data_packet(dataPack *packet,int block_num, int packet_size) {
-	return 0;
-}
 
 int main() {
 
@@ -116,27 +132,27 @@ int main() {
 	struct timeval tv;
 	bool packet_ready = false;
 	int timeoutExpiredCount = 0;
-	int block_num = 0;
 	bool last_data_packet = false;
 	uint16_t data_size;
 	int lastWriteSize;
 	char *data = NULL;
 	int data_pack_size;
+	uint16_t *two_byte_ptr = NULL;
+	bool HW_error = false;
 
 	descriptor = open_socket(TEMP_PORT);
 
+	char *buffer = new char[DATA_PACK_SIZE];
+
 	//listen forever
 	while (true) {
-		//clientfd = accept(descriptor, (struct sockaddr *)&client_addr, &client_addr_len);
-		//if (clientfd == -1) {
-		//	perror("TTFTP_ERROR:");
-		//	exit(-1);
-		//}
+		int block_num = 0;
+		int data_block_num = 0;
+		HW_error = false;
 
-		char *buffer = new char[516];
-		//res = recv(clientfd, buffer, 516, NULL);
-		res = recvfrom(descriptor, buffer, 516, 0, (struct sockaddr *) &client_addr, &client_addr_len);
-		if (res == -1) {
+		memset(buffer,0,DATA_PACK_SIZE);
+		res = recvfrom(descriptor, buffer, DATA_PACK_SIZE, 0, (struct sockaddr *) &client_addr, &client_addr_len);
+		if (res <= 0) {
 			perror("TTFTP_ERROR:");
 			delete buffer;
 			exit(-1);
@@ -144,7 +160,7 @@ int main() {
 
 		int size_read = res;
 
-		char filename[516] = {0};
+		char filename[DATA_PACK_SIZE] = {0};
 		char trans_mode[6] = {0};
 		int opcode = 0;
 
@@ -176,7 +192,7 @@ int main() {
 				do
 				{
 
-					// TODO: Wait WAIT_FOR_PACKET_TIMEOUT to see if something appears
+					// Wait WAIT_FOR_PACKET_TIMEOUT to see if something appears
 					// for us at the socket (we are waiting for DATA)
 					tv.tv_sec = WAIT_FOR_PACKET_TIMEOUT;
 					tv.tv_usec = 0;
@@ -194,58 +210,68 @@ int main() {
 					} else {
 						packet_ready = false;
 					}
-					// TODO: if there was something at the socket and
+					// if there was something at the socket and
 					// we are here not because of a timeout
 					if (packet_ready)
 					{
-						// TODO: Read the DATA packet from the socket (at
+						// Read the DATA packet from the socket (at
 						// least we hope this is a DATA packet)
-						memset(buffer,0,DATA_PACK_SIZE + 2);
-						res = recv(descriptor, buffer, 516, 0);
+						memset(buffer,0,DATA_PACK_SIZE );
+						res = recv(descriptor, buffer, DATA_PACK_SIZE, 0);
 						if (res == -1) {
 							perror("TTFTP_ERROR:");
 							delete buffer;
 							exit(-1);
 						}
-						printf("recieved data packet\n");
-
 					}
+
+					if (timeoutExpiredCount >= NUMBER_OF_FAILURES)
+					{
+						HW_error = true;
+						break;
+					}
+
 					if (!packet_ready) //Time out expired while waiting for data to appear at the socket
 					{
 						send_ACK_packet(descriptor,block_num, &client_addr, client_addr_len);
 						timeoutExpiredCount++;
 					}
 
-					if (timeoutExpiredCount >= NUMBER_OF_FAILURES)
-					{
-						//Error message
-						delete buffer;
-						exit(-1);
-					}
-
 				} while (res == -1); //Continue while some socket was ready but recvfrom somehow failed to read the data
 
-				data_size = *(buffer + 1);
-				data = buffer + 2;
+				// If the were too many timeouts
+				if (HW_error) {
+					last_data_packet = true;
+					break;
+				}
 
-				block_num = block_num + 1;
-				if (data_size < DATA_PACK_SIZE) {
-					printf("test\n");
+				res = parse_data_packet(buffer,res,&data_size,&data_block_num,&data);
+
+				if (res == -1) // We got something else but DATA
+				{
+					HW_error = true;
+					last_data_packet = true;
+					break;
+				}
+				if (data_block_num != block_num + 1)
+				{
+					HW_error = true;
+					last_data_packet = true;
+					break;
+				}
+				if (data_size < DATA_PACK_SIZE - 4) {
 					last_data_packet = true;
 				}
-				if (res == -1) // TODO: We got something else but DATA
-				{
-					// FATAL ERROR BAIL OUT
-				}
-				if (res != block_num + 1)
-				{
-					// FATAL ERROR BAIL OUT
-				}
-				//block_num = res + 1; // Update block number to ACK
+				block_num = data_block_num; // Update block number to ACK
+				printf("IN:DATA, %d, %d\n",data_block_num,data_size + 4);
+
+				send_ACK_packet(descriptor,block_num, &client_addr, client_addr_len);
 			} while (false);
 			timeoutExpiredCount = 0;
-			lastWriteSize = fwrite(data,data_size,1,file); // write next bulk of data
-			send_ACK_packet(descriptor,block_num, &client_addr, client_addr_len);
+			if (!HW_error) {
+				lastWriteSize = fwrite(data, 1, data_size, file);
+				printf("WRITING:%d\n",data_size);
+			}
 		} while (!last_data_packet); // Have blocks left to be read from client (not end of transmission).
 		res = fclose(file);
 		if ( res == EOF) {
@@ -253,9 +279,10 @@ int main() {
 			delete buffer;
 			exit(-1);
 		}
+		if(HW_error)
+			printf("RECVFAIL\n");
+		else
+			printf("RECVOK\n");
 	}
-
-
-
 
 }
