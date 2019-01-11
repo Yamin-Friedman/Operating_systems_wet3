@@ -1,6 +1,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <winsock.h>
+//#include <winsock.h>
 #include <cstdio>
 #include <unistd.h>
 #include <vector>
@@ -9,10 +9,14 @@
 #include <fcntl.h>
 #include <sys/time.h>
 #include <iostream>
+#include <stdio.h>
+#include <string.h>
+#include <arpa/inet.h>
+
 
 using namespace std;
 
-#define TEMP_PORT 69 // To be replaced
+#define TEMP_PORT 2001 // To be replaced
 #define WAIT_FOR_PACKET_TIMEOUT 3
 #define NUMBER_OF_FAILURES  7
 #define ACK_OPCODE  4
@@ -25,25 +29,12 @@ struct ackPack {
 	uint16_t blockNum;
 }__attribute__((packed));
 
-struct dataPack {
-	uint16_t opcode;
-	uint16_t block_num;
-	uint8_t data[512];
-}__attribute__((packed));
-
-struct WRQPack {
-	uint16_t opcode;
-	char* fileName;
-	uint8_t stringTerminator1;
-	void* transmissionMode;
-	uint8_t stringTerminator2;
-}__attribute__((packed));
 
 int open_socket(int port) {
 	int descriptor;
 	int res;
 
-	descriptor = socket(AF_INET, SOCK_DGRAM, 0);
+	descriptor = socket(AF_INET, SOCK_DGRAM , 0);
 	if (descriptor == -1) {
 		perror("TTFTP_ERROR:");
 		exit(-1);
@@ -60,89 +51,121 @@ int open_socket(int port) {
 		exit(-1);
 	}
 
-	res = listen(descriptor, 1);
-
+	//res = listen(descriptor, 1);
 	if (res == -1) {
 		perror("TTFTP_ERROR:");
 		exit(-1);
 	}
+
+	return descriptor;
+}
+
+int parse_WQE_packet(char *buffer, char *filename, char *trans_mode, int *opcode){
+
+	if(buffer == NULL)
+		return -1;
+
+	char *ptr = buffer + 2;
+
+	*opcode = *(buffer + 1);
+	for(int i = 0; *ptr != 0; i++) {
+		filename[i] = *ptr;
+		ptr++;
+	}
+	ptr++;
+	for(int i = 0; *ptr != 0; i++) {
+		trans_mode[i] = *ptr;
+		ptr++;
+	}
+
+	return 0;
 }
 
 void send_ACK_packet(int descriptor, int blockNum, struct sockaddr_in *sock, int len) {
 	struct ackPack ackpack;
-	ssize_t IsSent;
+	int res;
 	ackpack.blockNum = htons(blockNum);
 	ackpack.opcode = htons(ACK_OPCODE);
 	// not sure what to type in the buf parameter:
-	if (IsSent = sendto(descriptor, (char*)&ackpack, sizeof(ackpack), 0, (struct sockaddr*)sock, len) < 0) {
+	res = sendto(descriptor, (void*)&ackpack, sizeof(ackpack), 0, (struct sockaddr*)sock, sizeof(*sock));
+	if (res == -1) {
 		perror("Ack sending ERROR\n");
 	}
 	printf("OUT:ACK,%d\n", blockNum);
 }
 
-int check_WRQ_packet(WRQPack *WRQ, int sizeRead) {
+int check_WRQ_packet(int opcode, char *mode) {
 
-	if (WRQ && WRQ->opcode == WRQ_OPCODE && strcmp((char*)WRQ->transmissionMode,"octet") == 0) {
+
+	if (opcode == WRQ_OPCODE && strcmp(mode,"octet\0") == 0) {
 		return 0;
 	}
 	return -1;
 }
 
 int check_data_packet(dataPack *packet,int block_num, int packet_size) {
-
+	return 0;
 }
 
 int main() {
 
-	int WRQflag = 0;
 	int descriptor, clientfd;
 	int res;
 	struct sockaddr_in client_addr = { 0 };
-	int client_addr_len = sizeof(client_addr);
+	socklen_t client_addr_len = sizeof(client_addr);
 	struct timeval tv;
 	bool packet_ready = false;
 	int timeoutExpiredCount = 0;
 	int block_num = 0;
 	bool last_data_packet = false;
-	int data_size;
+	uint16_t data_size;
 	int lastWriteSize;
+	char *data = NULL;
+	int data_pack_size;
 
 	descriptor = open_socket(TEMP_PORT);
 
 	//listen forever
-	while (1) {
+	while (true) {
+		//clientfd = accept(descriptor, (struct sockaddr *)&client_addr, &client_addr_len);
+		//if (clientfd == -1) {
+		//	perror("TTFTP_ERROR:");
+		//	exit(-1);
+		//}
 
-		clientfd = accept(descriptor, (struct sockaddr *)&client_addr, &client_addr_len);
-		if (clientfd == -1) {
-			perror("TTFTP_ERROR:");
-			exit(-1);
-		}
-
-		char *buffer = new char(516);
-
+		char *buffer = new char[516];
 		//res = recv(clientfd, buffer, 516, NULL);
-		res = recvfrom(clientfd, buffer, 516, 0, (struct sockaddr *) &client_addr, &client_addr_len);
+		res = recvfrom(descriptor, buffer, 516, 0, (struct sockaddr *) &client_addr, &client_addr_len);
 		if (res == -1) {
 			perror("TTFTP_ERROR:");
 			delete buffer;
 			exit(-1);
 		}
 
-		WRQPack *WRQ = (WRQPack*)buffer;
-
 		int size_read = res;
 
-		res = check_WRQ_packet(WRQ, size_read);
+		char filename[516] = {0};
+		char trans_mode[6] = {0};
+		int opcode = 0;
+
+		res = parse_WQE_packet(buffer,filename,trans_mode,&opcode);
+		if (res == -1) {
+			perror("TTFTP_ERROR:");
+			delete buffer;
+			exit(-1);
+		}
+
+		res = check_WRQ_packet(opcode, trans_mode);
 		if (res == -1) {
 			cerr << "FLOWERROR: Unsupported WRQ format" << endl;
 			delete buffer;
 			exit(-1);
 		}
 
-		printf("IN:WRQ, %s, %s\n", *(WRQ->fileName), WRQ->transmissionMode);
+		printf("IN:WRQ, %s, %s\n", filename, trans_mode);
 
-		FILE *file = fopen(WRQ->fileName, "w");
-		send_ACK_packet(clientfd, block_num, &client_addr, client_addr_len);
+		FILE *file = fopen(filename, "w");
+		send_ACK_packet(descriptor, block_num, &client_addr, client_addr_len);
 		last_data_packet = false;
 
 		do
@@ -159,8 +182,8 @@ int main() {
 					tv.tv_usec = 0;
 					fd_set rfds;
 					FD_ZERO(&rfds);
-					FD_SET(clientfd, &rfds);
-					res = select(descriptor,&rfds,NULL,NULL,&tv);
+					FD_SET(descriptor, &rfds);
+					res = select(descriptor + 1,&rfds,NULL,NULL,&tv);
 
 					if (res == -1) {
 						perror("TTFTP_ERROR:");
@@ -177,12 +200,14 @@ int main() {
 					{
 						// TODO: Read the DATA packet from the socket (at
 						// least we hope this is a DATA packet)
-						res = recvfrom(clientfd, buffer, 516, 0, (struct sockaddr *) &client_addr, &client_addr_len);
+						memset(buffer,0,DATA_PACK_SIZE + 2);
+						res = recv(descriptor, buffer, 516, 0);
 						if (res == -1) {
 							perror("TTFTP_ERROR:");
 							delete buffer;
 							exit(-1);
 						}
+						printf("recieved data packet\n");
 
 					}
 					if (!packet_ready) //Time out expired while waiting for data to appear at the socket
@@ -200,13 +225,12 @@ int main() {
 
 				} while (res == -1); //Continue while some socket was ready but recvfrom somehow failed to read the data
 
-				dataPack *data_pack = (dataPack*)buffer;
-				size_read = res;
+				data_size = *(buffer + 1);
+				data = buffer + 2;
 
-				res = check_data_packet(data_pack,block_num,size_read);
-				block_num = data_pack->block_num + 1;
-				data_size = sizeof(data_pack->data);
+				block_num = block_num + 1;
 				if (data_size < DATA_PACK_SIZE) {
+					printf("test\n");
 					last_data_packet = true;
 				}
 				if (res == -1) // TODO: We got something else but DATA
@@ -217,10 +241,10 @@ int main() {
 				{
 					// FATAL ERROR BAIL OUT
 				}
-				block_num = res + 1; // Update block number to ACK
-			} while (FALSE);
+				//block_num = res + 1; // Update block number to ACK
+			} while (false);
 			timeoutExpiredCount = 0;
-			lastWriteSize = fwrite(NULL,8,8,file); // write next bulk of data
+			lastWriteSize = fwrite(data,data_size,1,file); // write next bulk of data
 			send_ACK_packet(descriptor,block_num, &client_addr, client_addr_len);
 		} while (!last_data_packet); // Have blocks left to be read from client (not end of transmission).
 		res = fclose(file);
