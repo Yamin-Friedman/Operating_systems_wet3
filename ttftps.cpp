@@ -1,6 +1,5 @@
 #include <sys/types.h>
 #include <sys/socket.h>
-//#include <winsock.h>
 #include <cstdio>
 #include <unistd.h>
 #include <vector>
@@ -9,18 +8,17 @@
 #include <fcntl.h>
 #include <sys/time.h>
 #include <iostream>
-#include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
 
 
 using namespace std;
 
-#define TEMP_PORT 2001 // To be replaced
 #define WAIT_FOR_PACKET_TIMEOUT 3
 #define NUMBER_OF_FAILURES  7
 #define ACK_OPCODE  4
 #define WRQ_OPCODE  2
+#define DATA_OPCODE 3
 #define DATA_PACK_SIZE 516
 
 
@@ -51,12 +49,6 @@ int open_socket(int port) {
 		exit(-1);
 	}
 
-	//res = listen(descriptor, 1);
-	if (res == -1) {
-		perror("TTFTP_ERROR:");
-		exit(-1);
-	}
-
 	return descriptor;
 }
 
@@ -81,6 +73,14 @@ int parse_WQE_packet(char *buffer, char *filename, char *trans_mode, int *opcode
 	return 0;
 }
 
+int check_WRQ_packet(int opcode, char *mode) {
+
+	if (opcode == WRQ_OPCODE && strcmp(mode,"octet\0") == 0) {
+		return 0;
+	}
+	return -1;
+}
+
 int parse_data_packet(char *buffer, int buffer_size, uint16_t *data_size, int *data_block_num, char** data) {
 
 	if (buffer_size < 4) {
@@ -90,7 +90,7 @@ int parse_data_packet(char *buffer, int buffer_size, uint16_t *data_size, int *d
 	uint16_t  *two_byte_ptr = (uint16_t *)buffer;
 	int opcode = ntohs(*two_byte_ptr);
 
-	if (opcode != 3) {
+	if (opcode != DATA_OPCODE) {
 		return -1;
 	}
 	*data_size = buffer_size - 4;
@@ -114,40 +114,47 @@ void send_ACK_packet(int descriptor, int blockNum, struct sockaddr_in *sock, int
 	printf("OUT:ACK,%d\n", blockNum);
 }
 
-int check_WRQ_packet(int opcode, char *mode) {
 
-	if (opcode == WRQ_OPCODE && strcmp(mode,"octet\0") == 0) {
-		return 0;
-	}
-	return -1;
-}
+int main(int argc, char **argv) {
 
-
-int main() {
-
-	int descriptor, clientfd;
+	int descriptor;
 	int res;
-	struct sockaddr_in client_addr = { 0 };
-	socklen_t client_addr_len = sizeof(client_addr);
-	struct timeval tv;
-	bool packet_ready = false;
-	int timeoutExpiredCount = 0;
-	bool last_data_packet = false;
-	uint16_t data_size;
-	int lastWriteSize;
-	char *data = NULL;
-	int data_pack_size;
 	uint16_t *two_byte_ptr = NULL;
-	bool HW_error = false;
 
-	descriptor = open_socket(TEMP_PORT);
+	if (argc < 2) {
+		cerr << "TTFTP_ERROR: Need to input port number" << endl;
+	}
+
+	int port_no = stoi(argv[1]);
+	if (port_no <=0 ) {
+		cerr << "TTFTP_ERROR: Invalid port number" << endl;
+	}
+
+	descriptor = open_socket(port_no);
 
 	char *buffer = new char[DATA_PACK_SIZE];
 
 	//listen forever
 	while (true) {
+
+		// Transfer params
 		int block_num = 0;
 		int data_block_num = 0;
+		int data_pack_size;
+		char *data = NULL;
+		uint16_t data_size;
+		int lastWriteSize;
+		int timeoutExpiredCount = 0;
+		struct timeval tv;
+		bool packet_ready = false;
+		bool last_data_packet = false;
+		bool HW_error = false;
+
+		// Client address params
+		struct sockaddr_in client_addr = { 0 };
+		socklen_t client_addr_len = sizeof(client_addr);
+
+
 		HW_error = false;
 
 		memset(buffer,0,DATA_PACK_SIZE);
@@ -270,15 +277,18 @@ int main() {
 			timeoutExpiredCount = 0;
 			if (!HW_error) {
 				lastWriteSize = fwrite(data, 1, data_size, file);
-				printf("WRITING:%d\n",data_size);
+				printf("WRITING:%d\n",lastWriteSize);
 			}
 		} while (!last_data_packet); // Have blocks left to be read from client (not end of transmission).
+
+		// Close file after transfer
 		res = fclose(file);
 		if ( res == EOF) {
 			perror("TTFTP_ERROR:");
 			delete buffer;
 			exit(-1);
 		}
+
 		if(HW_error)
 			printf("RECVFAIL\n");
 		else
